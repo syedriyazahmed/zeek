@@ -1,0 +1,825 @@
+rules_version = '2';
+
+// ===============================================================
+// Assumed Data Model
+// ===============================================================
+//
+// Root Database Structure: Multi-tenant Shop Partitioning
+//
+// Collection: /shops/{shopId}
+// Document ID: shopId (string)
+// Fields:
+//   - shopId: string (required, 1..60 chars, immutable)
+//   - name: string (required, 1..100 chars)
+//   - address: string (optional, 0..200 chars)
+//   - phoneNumber: string (optional, 0..25 chars)
+//   - currency: string (optional, 0..10 chars)
+//   - isActive: bool (required)
+//   - createdAt: timestamp (required, immutable)
+//   - updatedAt: timestamp (required)
+//
+// Subcollection: /shops/{shopId}/users/{userId}
+// Document ID: userId == request.auth.uid
+// Fields:
+//   - uid: string (required, immutable, matches userId)
+//   - email: string (required, valid email, 5..100 chars)
+//   - displayName: string (required, 1..80 chars)
+//   - role: string (required, 'admin' | 'employee')
+//   - shopId: string (required, matches shopId, immutable)
+//   - isActive: bool (required)
+//   - createdAt: timestamp (required, immutable)
+//
+// Subcollection: /shops/{shopId}/products/{productId}
+// Document ID: productId (string)
+// Fields:
+//   - productId: string (required, matches productId, immutable)
+//   - productName: string (required, 1..120 chars)
+//   - normalizedName: string (required, 1..120 chars)
+//   - productCode: string (required, 1..60 chars)
+//   - productType: string (required, 'Oil' | 'Non-Oil')
+//   - category: string (required, 1..60 chars)
+//   - unit: string (required, 'ml' | 'piece')
+//   - vendorId: string (optional, 0..60 chars)
+//   - totalPurchased: number (required, >= 0)
+//   - totalSold: number (required, >= 0)
+//   - availableQuantity: number (required, can be negative if oversold/adjusted)
+//   - vendorPricePerUnit: number (required, >= 0)
+//   - sellingPricePerUnit: number (required, >= 0)
+//   - lowStockThreshold: number (required, >= 0)
+//   - isActive: bool (required)
+//   - createdAt: timestamp (required, immutable)
+//   - updatedAt: timestamp (required)
+//
+// Subcollection: /shops/{shopId}/vendors/{vendorId}
+// Document ID: vendorId (string)
+// Fields:
+//   - vendorId: string (required, matches vendorId, immutable)
+//   - vendorName: string (required, 1..100 chars)
+//   - phoneNumber: string (optional, 0..25 chars)
+//   - address: string (optional, 0..250 chars)
+//   - companyName: string (optional, 0..100 chars)
+//   - notes: string (optional, 0..500 chars)
+//   - createdDate: timestamp (required, immutable)
+//   - isActive: bool (required)
+//
+// Subcollection: /shops/{shopId}/purchases/{purchaseId}
+// Document ID: purchaseId (string)
+// Fields:
+//   - purchaseId: string (required, matches purchaseId, immutable)
+//   - vendorId: string (required, 1..60 chars)
+//   - vendorName: string (optional, 0..100 chars)
+//   - invoiceNumber: string (optional, 0..60 chars)
+//   - purchaseDate: timestamp (required)
+//   - items: list (required, 1..200 items)
+//   - totalAmount: number (required, >= 0)
+//   - paidAmount: number (optional, >= 0)
+//   - paymentStatus: string (optional, 'paid' | 'partial' | 'unpaid')
+//   - paymentType: string (optional, 'cash' | 'online' | 'split' | 'credit')
+//   - notes: string (optional, 0..500 chars)
+//   - createdAt: timestamp (required, immutable)
+//   - createdBy: string (required, matches auth UID, immutable)
+//   - updatedAt: timestamp (optional)
+//
+// Subcollection: /shops/{shopId}/sales/{saleId}
+// Document ID: saleId (string)
+// Fields:
+//   - saleId: string (required, matches saleId, immutable)
+//   - saleNumber: string (optional, 0..50 chars)
+//   - invoiceNumber: string (optional, 0..50 chars)
+//   - items: list (required, 1..100 items, immutable)
+//   - totalAmount: number (optional, >= 0, immutable)
+//   - discountAmount: number (optional, >= 0, immutable)
+//   - taxAmount: number (optional, >= 0, immutable)
+//   - grandTotal: number (required, > 0, immutable)
+//   - paymentType: string (required, 'cash' | 'online' | 'split', immutable)
+//   - cashAmount: number (optional/required based on paymentType, immutable)
+//   - onlineAmount: number (optional/required based on paymentType, immutable)
+//   - status: string (required, 'completed' | 'cancelled')
+//   - customerName: string (optional, 0..80 chars)
+//   - customerPhone: string (optional, 0..25 chars)
+//   - notes: string (optional, 0..300 chars)
+//   - createdAt: timestamp (required, immutable)
+//   - createdBy: string (required, matches auth UID, immutable)
+//   - cancelledAt: timestamp (optional, required if status == 'cancelled')
+//   - cancelledBy: string (optional, required if status == 'cancelled')
+//   - cancelReason: string (optional, required if status == 'cancelled', 3..200 chars)
+//
+// Subcollection: /shops/{shopId}/expenses/{expenseId}
+// Document ID: expenseId (string)
+// Fields:
+//   - expenseId: string (required, matches expenseId, immutable)
+//   - category: string (required, 1..60 chars)
+//   - amount: number (required, > 0)
+//   - paymentType: string (required, 'cash' | 'online')
+//   - description: string (required, 1..200 chars)
+//   - expenseDate: timestamp (optional)
+//   - notes: string (optional, 0..300 chars)
+//   - createdAt: timestamp (required, immutable)
+//   - createdBy: string (required, matches auth UID, immutable)
+//
+// Subcollection: /shops/{shopId}/stock_movements/{movementId} (APPEND-ONLY LEDGER)
+// Document ID: movementId (string)
+// Fields:
+//   - movementId: string (required, matches movementId, immutable)
+//   - productId: string (required, 1..60 chars)
+//   - movementType: string (required, 'OPENING_STOCK' | 'PURCHASE' | 'SALE' | 'SALE_RETURN' | 'DAMAGE' | 'WASTAGE' | 'STOCK_ADJUSTMENT')
+//   - quantity: number (required, != 0)
+//   - unit: string (required, 'ml' | 'piece')
+//   - referenceId: string (optional, 0..60 chars)
+//   - referenceType: string (optional, 0..40 chars)
+//   - notes: string (optional, 0..300 chars)
+//   - createdAt: timestamp (required, immutable)
+//   - createdBy: string (required, matches auth UID, immutable)
+//
+// Subcollection: /shops/{shopId}/account_entries/{entryId} (APPEND-ONLY LEDGER)
+// Document ID: entryId (string)
+// Fields:
+//   - entryId: string (required, matches entryId, immutable)
+//   - entryType: string (required, 'OPENING_BALANCE' | 'SALE_INCOME' | 'EXPENSE' | 'TRANSFER' | 'REFUND' | 'ADJUSTMENT')
+//   - amount: number (required, > 0)
+//   - paymentMethod: string (required, 'cash' | 'online')
+//   - direction: string (optional, 'credit' | 'debit' | 'in' | 'out')
+//   - referenceId: string (optional, 0..60 chars)
+//   - referenceType: string (optional, 0..40 chars)
+//   - description: string (optional, 0..250 chars)
+//   - createdAt: timestamp (required, immutable)
+//   - createdBy: string (required, matches auth UID, immutable)
+//
+// Subcollection: /shops/{shopId}/daily_summaries/{date}
+// Document ID: date (string, YYYY-MM-DD format)
+// Fields:
+//   - date: string (required, matches date, 10 chars, immutable)
+//   - totalSales: number (required, >= 0)
+//   - totalExpenses: number (required, >= 0)
+//   - totalPurchases: number (optional, >= 0)
+//   - cashIn: number (required, >= 0)
+//   - onlineIn: number (required, >= 0)
+//   - cashOut: number (required, >= 0)
+//   - onlineOut: number (required, >= 0)
+//   - netCash: number (required)
+//   - netOnline: number (required)
+//   - salesCount: int (required, >= 0)
+//   - createdAt: timestamp (required, immutable)
+//   - updatedAt: timestamp (required)
+//
+// Subcollection: /shops/{shopId}/import_jobs/{jobId}
+// Document ID: jobId (string)
+// Fields:
+//   - jobId: string (required, matches jobId, immutable)
+//   - type: string (required, 'products' | 'stock' | 'vendors')
+//   - status: string (required, 'pending' | 'processing' | 'completed' | 'failed')
+//   - totalRecords: int (required, >= 0)
+//   - processedRecords: int (required, >= 0)
+//   - failedRecords: int (required, >= 0)
+//   - errors: list (optional, 0..50 items)
+//   - createdAt: timestamp (required, immutable)
+//   - createdBy: string (required, matches auth UID, immutable)
+//   - completedAt: timestamp (optional)
+//
+// Subcollection: /shops/{shopId}/settings/{settingId}
+// Document ID: settingId (string)
+// Fields:
+//   - settingId: string (required, matches settingId, immutable)
+//   - shopName: string (optional, 0..100 chars)
+//   - currency: string (optional, 0..10 chars)
+//   - currencySymbol: string (optional, 0..5 chars)
+//   - vatOrTaxRate: number (optional, >= 0)
+//   - invoicePrefix: string (optional, 0..15 chars)
+//   - lowStockDefault: number (optional, >= 0)
+//   - updatedAt: timestamp (required)
+//   - updatedBy: string (required, matches auth UID)
+//
+// ===============================================================
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ===============================================================
+    // Global Default Deny
+    // ===============================================================
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // ===============================================================
+    // Core Helper Functions Library
+    // ===============================================================
+
+    // Check if the user is authenticated with Firebase Auth
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    // Check if user is a member of the given shop
+    function isShopMember(shopId) {
+      return isSignedIn() && (
+        request.auth.token.get('shopId', '') == shopId ||
+        exists(/databases/$(database)/documents/shops/$(shopId)/users/$(request.auth.uid))
+      );
+    }
+
+    // Retrieve the user profile document data for the active shop
+    function getUserData(shopId) {
+      return get(/databases/$(database)/documents/shops/$(shopId)/users/$(request.auth.uid)).data;
+    }
+
+    // Check if the user has an admin role for the shop
+    function isAdmin(shopId) {
+      return isSignedIn() && (
+        (request.auth.token.get('role', '') == 'admin' && (request.auth.token.get('shopId', '') == shopId || request.auth.token.get('shopId', '') == '')) ||
+        request.auth.token.get('admin', false) == true ||
+        (exists(/databases/$(database)/documents/shops/$(shopId)/users/$(request.auth.uid)) &&
+         getUserData(shopId).role == 'admin')
+      );
+    }
+
+    // Check if the user is an employee (or admin) in the shop
+    function isEmployee(shopId) {
+      return isSignedIn() && (
+        isAdmin(shopId) ||
+        (request.auth.token.get('role', '') == 'employee' && request.auth.token.get('shopId', '') == shopId) ||
+        (exists(/databases/$(database)/documents/shops/$(shopId)/users/$(request.auth.uid)) &&
+         getUserData(shopId).role == 'employee')
+      );
+    }
+
+    // Verify required fields exist
+    function hasRequired(data, keys) {
+      return data.keys().hasAll(keys);
+    }
+
+    // Strict schema check: prevent undefined/arbitrary fields
+    function hasOnlyAllowed(data, keys) {
+      return data.keys().hasOnly(keys);
+    }
+
+    // String length boundary check (guards against empty strings and DoS/1MB payloads)
+    function isValidString(val, minLen, maxLen) {
+      return val is string && val.size() >= minLen && val.size() <= maxLen;
+    }
+
+    // Optional string check: if present, must satisfy bounds
+    function isValidOptionalString(data, field, minLen, maxLen) {
+      return !(field in data) || (data[field] is string && data[field].size() >= minLen && data[field].size() <= maxLen);
+    }
+
+    // RFC-compliant email regex format check
+    function isValidEmail(email) {
+      return email is string && email.matches('^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$');
+    }
+
+    // Strictly positive numeric validation (> 0)
+    function isPositiveNumber(val) {
+      return (val is int || val is float) && val > 0;
+    }
+
+    // Non-negative numeric validation (>= 0)
+    function isNonNegativeNumber(val) {
+      return (val is int || val is float) && val >= 0;
+    }
+
+    // List validation with bounded length
+    function isValidList(val, minSize, maxSize) {
+      return val is list && val.size() >= minSize && val.size() <= maxSize;
+    }
+
+    // Immutability validation: ensure protected fields have not changed in update
+    function areFieldsUnchanged(fields) {
+      return !request.resource.data.diff(resource.data).affectedKeys().hasAny(fields);
+    }
+
+    // Absolute difference between two numbers (avoids floating point rounding issues)
+    function absDiff(a, b) {
+      return a >= b ? a - b : b - a;
+    }
+
+    // ===============================================================
+    // Domain Validators
+    // ===============================================================
+
+    // Shop document validator
+    function isValidShop(data, shopId) {
+      return hasOnlyAllowed(data, ['shopId', 'name', 'address', 'phoneNumber', 'currency', 'isActive', 'createdAt', 'updatedAt']) &&
+             hasRequired(data, ['shopId', 'name', 'isActive', 'createdAt', 'updatedAt']) &&
+             data.shopId == shopId &&
+             isValidString(data.name, 1, 100) &&
+             isValidOptionalString(data, 'address', 0, 200) &&
+             isValidOptionalString(data, 'phoneNumber', 0, 25) &&
+             isValidOptionalString(data, 'currency', 0, 10) &&
+             data.isActive is bool &&
+             data.createdAt is timestamp &&
+             data.updatedAt is timestamp;
+    }
+
+    // User document validator
+    function isValidUser(data, userId, shopId) {
+      return hasOnlyAllowed(data, ['uid', 'email', 'displayName', 'role', 'shopId', 'isActive', 'createdAt']) &&
+             hasRequired(data, ['uid', 'email', 'displayName', 'role', 'shopId', 'isActive', 'createdAt']) &&
+             data.uid == userId &&
+             data.shopId == shopId &&
+             isValidEmail(data.email) &&
+             isValidString(data.displayName, 1, 80) &&
+             data.role in ['admin', 'employee'] &&
+             data.isActive is bool &&
+             data.createdAt is timestamp;
+    }
+
+    // Product document validator
+    function isValidProduct(data, productId) {
+      return hasOnlyAllowed(data, [
+               'productId', 'productName', 'normalizedName', 'productCode', 'productType',
+               'category', 'unit', 'vendorId', 'totalPurchased', 'totalSold',
+               'availableQuantity', 'vendorPricePerUnit', 'sellingPricePerUnit',
+               'lowStockThreshold', 'isActive', 'createdAt', 'updatedAt'
+             ]) &&
+             hasRequired(data, [
+               'productId', 'productName', 'normalizedName', 'productCode', 'productType',
+               'category', 'unit', 'totalPurchased', 'totalSold', 'availableQuantity',
+               'vendorPricePerUnit', 'sellingPricePerUnit', 'lowStockThreshold',
+               'isActive', 'createdAt', 'updatedAt'
+             ]) &&
+             data.productId == productId &&
+             isValidString(data.productName, 1, 120) &&
+             isValidString(data.normalizedName, 1, 120) &&
+             isValidString(data.productCode, 1, 60) &&
+             data.productType in ['Oil', 'Non-Oil'] &&
+             isValidString(data.category, 1, 60) &&
+             data.unit in ['ml', 'piece'] &&
+             isValidOptionalString(data, 'vendorId', 0, 60) &&
+             isNonNegativeNumber(data.totalPurchased) &&
+             isNonNegativeNumber(data.totalSold) &&
+             (data.availableQuantity is int || data.availableQuantity is float) &&
+             isNonNegativeNumber(data.vendorPricePerUnit) &&
+             isNonNegativeNumber(data.sellingPricePerUnit) &&
+             isNonNegativeNumber(data.lowStockThreshold) &&
+             data.isActive is bool &&
+             data.createdAt is timestamp &&
+             data.updatedAt is timestamp;
+    }
+
+    // Vendor document validator
+    function isValidVendor(data, vendorId) {
+      return hasOnlyAllowed(data, ['vendorId', 'vendorName', 'phoneNumber', 'address', 'companyName', 'notes', 'createdDate', 'isActive']) &&
+             hasRequired(data, ['vendorId', 'vendorName', 'createdDate', 'isActive']) &&
+             data.vendorId == vendorId &&
+             isValidString(data.vendorName, 1, 100) &&
+             isValidOptionalString(data, 'phoneNumber', 0, 25) &&
+             isValidOptionalString(data, 'address', 0, 250) &&
+             isValidOptionalString(data, 'companyName', 0, 100) &&
+             isValidOptionalString(data, 'notes', 0, 500) &&
+             data.createdDate is timestamp &&
+             data.isActive is bool;
+    }
+
+    // Purchase document validator
+    function isValidPurchase(data, purchaseId) {
+      return hasOnlyAllowed(data, [
+               'purchaseId', 'vendorId', 'vendorName', 'invoiceNumber', 'purchaseDate',
+               'items', 'totalAmount', 'paidAmount', 'paymentStatus', 'paymentType',
+               'notes', 'createdAt', 'createdBy', 'updatedAt'
+             ]) &&
+             hasRequired(data, ['purchaseId', 'vendorId', 'purchaseDate', 'items', 'totalAmount', 'createdAt', 'createdBy']) &&
+             data.purchaseId == purchaseId &&
+             isValidString(data.vendorId, 1, 60) &&
+             isValidOptionalString(data, 'vendorName', 0, 100) &&
+             isValidOptionalString(data, 'invoiceNumber', 0, 60) &&
+             data.purchaseDate is timestamp &&
+             isValidList(data.items, 1, 200) &&
+             isNonNegativeNumber(data.totalAmount) &&
+             (!('paidAmount' in data) || isNonNegativeNumber(data.paidAmount)) &&
+             (!('paymentStatus' in data) || data.paymentStatus in ['paid', 'partial', 'unpaid']) &&
+             (!('paymentType' in data) || data.paymentType in ['cash', 'online', 'split', 'credit']) &&
+             isValidOptionalString(data, 'notes', 0, 500) &&
+             data.createdAt is timestamp &&
+             isValidString(data.createdBy, 1, 60) &&
+             (!('updatedAt' in data) || data.updatedAt is timestamp);
+    }
+
+    // Helper to get effective grand total of a sale
+    function getSaleGrandTotal(data) {
+      return ('grandTotal' in data && (data.grandTotal is int || data.grandTotal is float))
+        ? data.grandTotal
+        : (('totalAmount' in data && (data.totalAmount is int || data.totalAmount is float)) ? data.totalAmount : 0);
+    }
+
+    // Sale payment calculation validator
+    function isValidSalePayment(data) {
+      let total = getSaleGrandTotal(data);
+      return total > 0 && (
+        // Cash payment: cashAmount must cover total, onlineAmount omitted or 0
+        (data.paymentType == 'cash' &&
+          isPositiveNumber(data.cashAmount) &&
+          data.cashAmount >= total &&
+          (!('onlineAmount' in data) || data.onlineAmount == 0)) ||
+        // Online payment: onlineAmount must match total, cashAmount omitted or 0
+        (data.paymentType == 'online' &&
+          isPositiveNumber(data.onlineAmount) &&
+          absDiff(data.onlineAmount, total) < 0.01 &&
+          (!('cashAmount' in data) || data.cashAmount == 0)) ||
+        // Split payment: both cashAmount and onlineAmount > 0 and sum equals total
+        (data.paymentType == 'split' &&
+          isPositiveNumber(data.cashAmount) &&
+          isPositiveNumber(data.onlineAmount) &&
+          absDiff(data.cashAmount + data.onlineAmount, total) < 0.01)
+      );
+    }
+
+    // Sale document validator
+    function isValidSale(data, saleId) {
+      return hasOnlyAllowed(data, [
+               'saleId', 'saleNumber', 'invoiceNumber', 'items', 'totalAmount',
+               'discountAmount', 'taxAmount', 'grandTotal', 'paymentType',
+               'cashAmount', 'onlineAmount', 'status', 'customerName',
+               'customerPhone', 'notes', 'createdAt', 'createdBy',
+               'cancelledAt', 'cancelledBy', 'cancelReason'
+             ]) &&
+             hasRequired(data, ['saleId', 'items', 'paymentType', 'status', 'createdAt', 'createdBy']) &&
+             data.saleId == saleId &&
+             isValidOptionalString(data, 'saleNumber', 0, 50) &&
+             isValidOptionalString(data, 'invoiceNumber', 0, 50) &&
+             isValidList(data.items, 1, 100) &&
+             data.items[0] is map &&
+             data.items[0].keys().hasAll(['productId', 'quantity', 'unitPrice']) &&
+             (data.items[0].quantity is int || data.items[0].quantity is float) &&
+             data.items[0].quantity > 0 &&
+             (!('totalAmount' in data) || isNonNegativeNumber(data.totalAmount)) &&
+             (!('discountAmount' in data) || isNonNegativeNumber(data.discountAmount)) &&
+             (!('taxAmount' in data) || isNonNegativeNumber(data.taxAmount)) &&
+             (!('grandTotal' in data) || isPositiveNumber(data.grandTotal)) &&
+             getSaleGrandTotal(data) > 0 &&
+             data.paymentType in ['cash', 'online', 'split'] &&
+             isValidSalePayment(data) &&
+             data.status in ['completed', 'cancelled'] &&
+             isValidOptionalString(data, 'customerName', 0, 80) &&
+             isValidOptionalString(data, 'customerPhone', 0, 25) &&
+             isValidOptionalString(data, 'notes', 0, 300) &&
+             data.createdAt is timestamp &&
+             isValidString(data.createdBy, 1, 60) &&
+             // Cancellation audit invariants
+             (data.status == 'cancelled'
+               ? (data.cancelledAt is timestamp && isValidString(data.cancelledBy, 1, 60) && isValidString(data.cancelReason, 3, 200))
+               : (!('cancelledAt' in data) && !('cancelledBy' in data) && !('cancelReason' in data)));
+    }
+
+    // Expense document validator
+    function isValidExpense(data, expenseId) {
+      return hasOnlyAllowed(data, ['expenseId', 'category', 'amount', 'paymentType', 'description', 'expenseDate', 'notes', 'createdAt', 'createdBy']) &&
+             hasRequired(data, ['expenseId', 'category', 'amount', 'paymentType', 'description', 'createdAt', 'createdBy']) &&
+             data.expenseId == expenseId &&
+             isValidString(data.category, 1, 60) &&
+             isPositiveNumber(data.amount) &&
+             data.paymentType in ['cash', 'online'] &&
+             isValidString(data.description, 1, 200) &&
+             (!('expenseDate' in data) || data.expenseDate is timestamp) &&
+             isValidOptionalString(data, 'notes', 0, 300) &&
+             data.createdAt is timestamp &&
+             isValidString(data.createdBy, 1, 60);
+    }
+
+    // Stock Movement document validator (Append-Only)
+    function isValidStockMovement(data, movementId) {
+      return hasOnlyAllowed(data, ['movementId', 'productId', 'movementType', 'quantity', 'unit', 'referenceId', 'referenceType', 'notes', 'createdAt', 'createdBy']) &&
+             hasRequired(data, ['movementId', 'productId', 'movementType', 'quantity', 'unit', 'createdAt', 'createdBy']) &&
+             data.movementId == movementId &&
+             isValidString(data.productId, 1, 60) &&
+             data.movementType in ['OPENING_STOCK', 'PURCHASE', 'SALE', 'SALE_RETURN', 'DAMAGE', 'WASTAGE', 'STOCK_ADJUSTMENT'] &&
+             (data.quantity is int || data.quantity is float) &&
+             data.quantity != 0 &&
+             data.unit in ['ml', 'piece'] &&
+             isValidOptionalString(data, 'referenceId', 0, 60) &&
+             isValidOptionalString(data, 'referenceType', 0, 40) &&
+             isValidOptionalString(data, 'notes', 0, 300) &&
+             data.createdAt is timestamp &&
+             isValidString(data.createdBy, 1, 60);
+    }
+
+    // Account Entry document validator (Append-Only Financial Ledger)
+    function isValidAccountEntry(data, entryId) {
+      return hasOnlyAllowed(data, ['entryId', 'entryType', 'amount', 'paymentMethod', 'direction', 'referenceId', 'referenceType', 'description', 'createdAt', 'createdBy']) &&
+             hasRequired(data, ['entryId', 'entryType', 'amount', 'paymentMethod', 'createdAt', 'createdBy']) &&
+             data.entryId == entryId &&
+             data.entryType in ['OPENING_BALANCE', 'SALE_INCOME', 'EXPENSE', 'TRANSFER', 'REFUND', 'ADJUSTMENT'] &&
+             isPositiveNumber(data.amount) &&
+             data.paymentMethod in ['cash', 'online'] &&
+             (!('direction' in data) || data.direction in ['credit', 'debit', 'in', 'out']) &&
+             isValidOptionalString(data, 'referenceId', 0, 60) &&
+             isValidOptionalString(data, 'referenceType', 0, 40) &&
+             isValidOptionalString(data, 'description', 0, 250) &&
+             data.createdAt is timestamp &&
+             isValidString(data.createdBy, 1, 60);
+    }
+
+    // Daily Summary document validator
+    function isValidDailySummary(data, date) {
+      return hasOnlyAllowed(data, [
+               'date', 'totalSales', 'totalExpenses', 'totalPurchases',
+               'cashIn', 'onlineIn', 'cashOut', 'onlineOut',
+               'netCash', 'netOnline', 'salesCount', 'createdAt', 'updatedAt'
+             ]) &&
+             hasRequired(data, [
+               'date', 'totalSales', 'totalExpenses', 'cashIn', 'onlineIn',
+               'cashOut', 'onlineOut', 'netCash', 'netOnline', 'salesCount',
+               'createdAt', 'updatedAt'
+             ]) &&
+             data.date == date &&
+             isValidString(data.date, 10, 10) &&
+             data.date.matches('^\\d{4}-\\d{2}-\\d{2}$') &&
+             isNonNegativeNumber(data.totalSales) &&
+             isNonNegativeNumber(data.totalExpenses) &&
+             (!('totalPurchases' in data) || isNonNegativeNumber(data.totalPurchases)) &&
+             isNonNegativeNumber(data.cashIn) &&
+             isNonNegativeNumber(data.onlineIn) &&
+             isNonNegativeNumber(data.cashOut) &&
+             isNonNegativeNumber(data.onlineOut) &&
+             (data.netCash is int || data.netCash is float) &&
+             (data.netOnline is int || data.netOnline is float) &&
+             data.salesCount is int &&
+             data.salesCount >= 0 &&
+             data.createdAt is timestamp &&
+             data.updatedAt is timestamp;
+    }
+
+    // Import Job document validator
+    function isValidImportJob(data, jobId) {
+      return hasOnlyAllowed(data, ['jobId', 'type', 'status', 'totalRecords', 'processedRecords', 'failedRecords', 'errors', 'createdAt', 'createdBy', 'completedAt']) &&
+             hasRequired(data, ['jobId', 'type', 'status', 'totalRecords', 'processedRecords', 'failedRecords', 'createdAt', 'createdBy']) &&
+             data.jobId == jobId &&
+             data.type in ['products', 'stock', 'vendors'] &&
+             data.status in ['pending', 'processing', 'completed', 'failed'] &&
+             data.totalRecords is int &&
+             data.totalRecords >= 0 &&
+             data.processedRecords is int &&
+             data.processedRecords >= 0 &&
+             data.failedRecords is int &&
+             data.failedRecords >= 0 &&
+             (!('errors' in data) || isValidList(data.errors, 0, 50)) &&
+             data.createdAt is timestamp &&
+             isValidString(data.createdBy, 1, 60) &&
+             (!('completedAt' in data) || data.completedAt is timestamp);
+    }
+
+    // Settings document validator
+    function isValidSetting(data, settingId) {
+      return hasOnlyAllowed(data, ['settingId', 'shopName', 'currency', 'currencySymbol', 'vatOrTaxRate', 'invoicePrefix', 'lowStockDefault', 'updatedAt', 'updatedBy']) &&
+             hasRequired(data, ['settingId', 'updatedAt', 'updatedBy']) &&
+             data.settingId == settingId &&
+             isValidOptionalString(data, 'shopName', 0, 100) &&
+             isValidOptionalString(data, 'currency', 0, 10) &&
+             isValidOptionalString(data, 'currencySymbol', 0, 5) &&
+             (!('vatOrTaxRate' in data) || isNonNegativeNumber(data.vatOrTaxRate)) &&
+             isValidOptionalString(data, 'invoicePrefix', 0, 15) &&
+             (!('lowStockDefault' in data) || isNonNegativeNumber(data.lowStockDefault)) &&
+             data.updatedAt is timestamp &&
+             isValidString(data.updatedBy, 1, 60);
+    }
+
+    // Helper to verify sale cancellation authority
+    function canCancelSale(shopId) {
+      return isAdmin(shopId) || (isEmployee(shopId) && resource.data.createdBy == request.auth.uid);
+    }
+
+    // ===============================================================
+    // Multi-tenant Shop Collection Rules
+    // ===============================================================
+
+    match /shops/{shopId} {
+      // Members can read their shop metadata
+      allow read: if isShopMember(shopId);
+
+      // Only trusted admins or initial shop bootstrap can create shop metadata
+      allow create: if isSignedIn() &&
+        isValidShop(request.resource.data, shopId) &&
+        (isAdmin(shopId) || !exists(/databases/$(database)/documents/shops/$(shopId)));
+
+      // Only shop admin can update shop configurations; id and createdAt are immutable
+      allow update: if isAdmin(shopId) &&
+        isValidShop(request.resource.data, shopId) &&
+        areFieldsUnchanged(['shopId', 'createdAt']);
+
+      // Shop deletion is prohibited client-side to prevent catastrophic data loss
+      allow delete: if false;
+
+      // -------------------------------------------------------------
+      // Subcollection: users
+      // -------------------------------------------------------------
+      match /users/{userId} {
+        // PII Protection: Employees can only read their own profile; Admins can read all shop users
+        allow read: if isAdmin(shopId) || (isShopMember(shopId) && request.auth.uid == userId);
+
+        // RBAC: Only Admin can create shop users with assigned roles; prevents privilege escalation
+        allow create: if isAdmin(shopId) && isValidUser(request.resource.data, userId, shopId);
+
+        // RBAC & Self-Escalation Protection:
+        // Admin can update profile/roles. Employees can only update their own displayName;
+        // role, uid, shopId, isActive, and createdAt are strictly immutable for employees.
+        allow update: if isValidUser(request.resource.data, userId, shopId) &&
+          areFieldsUnchanged(['uid', 'shopId', 'createdAt']) &&
+          (
+            isAdmin(shopId) ||
+            (request.auth.uid == userId && areFieldsUnchanged(['role', 'isActive']))
+          );
+
+        // Only Admin can delete users, and cannot delete themselves to avoid orphaned shops
+        allow delete: if isAdmin(shopId) && request.auth.uid != userId;
+      }
+
+      // -------------------------------------------------------------
+      // Subcollection: products
+      // -------------------------------------------------------------
+      match /products/{productId} {
+        // Both Employee and Admin can view product catalog and prices
+        allow read: if isShopMember(shopId);
+
+        // Only Admin can add new products
+        allow create: if isAdmin(shopId) && isValidProduct(request.resource.data, productId);
+
+        // Only Admin can update products; stock balances & pricing cannot be modified client-side by employees
+        allow update: if isAdmin(shopId) &&
+          isValidProduct(request.resource.data, productId) &&
+          areFieldsUnchanged(['productId', 'createdAt']);
+
+        // Only Admin can delete products
+        allow delete: if isAdmin(shopId);
+      }
+
+      // -------------------------------------------------------------
+      // Subcollection: vendors
+      // -------------------------------------------------------------
+      match /vendors/{vendorId} {
+        // Employees can read vendor contact/information
+        allow read: if isShopMember(shopId);
+
+        // Only Admin can create, modify, or delete vendors
+        allow create: if isAdmin(shopId) && isValidVendor(request.resource.data, vendorId);
+
+        allow update: if isAdmin(shopId) &&
+          isValidVendor(request.resource.data, vendorId) &&
+          areFieldsUnchanged(['vendorId', 'createdDate']);
+
+        allow delete: if isAdmin(shopId);
+      }
+
+      // -------------------------------------------------------------
+      // Subcollection: purchases
+      // -------------------------------------------------------------
+      match /purchases/{purchaseId} {
+        // Shop members can view purchase history
+        allow read: if isShopMember(shopId);
+
+        // Only Admin can record purchases directly
+        allow create: if isAdmin(shopId) &&
+          request.resource.data.createdBy == request.auth.uid &&
+          isValidPurchase(request.resource.data, purchaseId);
+
+        allow update: if isAdmin(shopId) &&
+          isValidPurchase(request.resource.data, purchaseId) &&
+          areFieldsUnchanged(['purchaseId', 'createdAt', 'createdBy']);
+
+        allow delete: if isAdmin(shopId);
+      }
+
+      // -------------------------------------------------------------
+      // Subcollection: sales
+      // -------------------------------------------------------------
+      match /sales/{saleId} {
+        // Shop members can read sales for receipts and POS history
+        allow read: if isShopMember(shopId);
+
+        // POS Sales: Employees and Admins can create sales; critical fields validated
+        allow create: if isShopMember(shopId) &&
+          request.resource.data.createdBy == request.auth.uid &&
+          request.resource.data.status == 'completed' &&
+          isValidSale(request.resource.data, saleId);
+
+        // Audit Trail: Sales CANNOT be permanently deleted
+        allow delete: if false;
+
+        // Sales Updates: Financial figures are locked. Updates are only allowed for:
+        // 1) Voiding/Cancelling the sale with audit info (Admin or the employee who created it)
+        // 2) Admin updating non-financial metadata (notes, customer details) while leaving status & financials untouched
+        allow update: if isValidSale(request.resource.data, saleId) &&
+          areFieldsUnchanged(['saleId', 'items', 'grandTotal', 'totalAmount', 'paymentType', 'cashAmount', 'onlineAmount', 'createdAt', 'createdBy']) &&
+          (
+            // Cancellation workflow
+            (canCancelSale(shopId) &&
+             resource.data.status == 'completed' &&
+             request.resource.data.status == 'cancelled' &&
+             request.resource.data.cancelledBy == request.auth.uid &&
+             request.resource.data.cancelledAt is timestamp &&
+             isValidString(request.resource.data.cancelReason, 3, 200)) ||
+            // Admin metadata update workflow
+            (isAdmin(shopId) &&
+             request.resource.data.status == resource.data.status &&
+             areFieldsUnchanged(['status', 'cancelledAt', 'cancelledBy', 'cancelReason']))
+          );
+      }
+
+      // -------------------------------------------------------------
+      // Subcollection: expenses
+      // -------------------------------------------------------------
+      match /expenses/{expenseId} {
+        // Shop members can view expenses
+        allow read: if isShopMember(shopId);
+
+        // Employees and Admins can create expense entries
+        allow create: if isShopMember(shopId) &&
+          request.resource.data.createdBy == request.auth.uid &&
+          isValidExpense(request.resource.data, expenseId);
+
+        // Employees cannot delete or arbitrarily overwrite financial ledgers
+        // Only Admin can update or delete expenses
+        allow update: if isAdmin(shopId) &&
+          isValidExpense(request.resource.data, expenseId) &&
+          areFieldsUnchanged(['expenseId', 'createdAt', 'createdBy']);
+
+        allow delete: if isAdmin(shopId);
+      }
+
+      // -------------------------------------------------------------
+      // Subcollection: stock_movements (APPEND-ONLY LEDGER)
+      // -------------------------------------------------------------
+      match /stock_movements/{movementId} {
+        // Shop members can view stock movement history
+        allow read: if isShopMember(shopId);
+
+        // Append-only ledger: created by Admin (or backend Cloud Functions)
+        allow create: if isAdmin(shopId) &&
+          request.resource.data.createdBy == request.auth.uid &&
+          isValidStockMovement(request.resource.data, movementId);
+
+        // Immutability: Movements must NEVER be updated or deleted once created
+        allow update: if false;
+        allow delete: if false;
+      }
+
+      // -------------------------------------------------------------
+      // Subcollection: account_entries (APPEND-ONLY FINANCIAL LEDGER)
+      // -------------------------------------------------------------
+      match /account_entries/{entryId} {
+        // Read-only for employees
+        allow read: if isShopMember(shopId);
+
+        // Append-only ledger: created by Admin (or backend Cloud Functions)
+        allow create: if isAdmin(shopId) &&
+          request.resource.data.createdBy == request.auth.uid &&
+          isValidAccountEntry(request.resource.data, entryId);
+
+        // Immutability: Financial entries must NEVER be updated or deleted once created
+        allow update: if false;
+        allow delete: if false;
+      }
+
+      // -------------------------------------------------------------
+      // Subcollection: daily_summaries (READ-ONLY FOR EMPLOYEES)
+      // -------------------------------------------------------------
+      match /daily_summaries/{date} {
+        // Daily summaries are read-only for employees
+        allow read: if isShopMember(shopId);
+
+        // Updates managed by Admin (or backend Cloud Functions)
+        allow create: if isAdmin(shopId) && isValidDailySummary(request.resource.data, date);
+
+        allow update: if isAdmin(shopId) &&
+          isValidDailySummary(request.resource.data, date) &&
+          areFieldsUnchanged(['date', 'createdAt']);
+
+        allow delete: if isAdmin(shopId);
+      }
+
+      // -------------------------------------------------------------
+      // Subcollection: import_jobs (ADMIN BULK OPERATIONS)
+      // -------------------------------------------------------------
+      match /import_jobs/{jobId} {
+        // Admin only tool
+        allow read: if isAdmin(shopId);
+
+        allow create: if isAdmin(shopId) &&
+          request.resource.data.createdBy == request.auth.uid &&
+          isValidImportJob(request.resource.data, jobId);
+
+        allow update: if isAdmin(shopId) &&
+          isValidImportJob(request.resource.data, jobId) &&
+          areFieldsUnchanged(['jobId', 'createdAt', 'createdBy']);
+
+        allow delete: if isAdmin(shopId);
+      }
+
+      // -------------------------------------------------------------
+      // Subcollection: settings
+      // -------------------------------------------------------------
+      match /settings/{settingId} {
+        // Employees can read shop settings (currency, tax, invoice prefix)
+        allow read: if isShopMember(shopId);
+
+        // Only Admin can configure settings
+        allow create: if isAdmin(shopId) && isValidSetting(request.resource.data, settingId);
+
+        allow update: if isAdmin(shopId) &&
+          isValidSetting(request.resource.data, settingId) &&
+          areFieldsUnchanged(['settingId']);
+
+        allow delete: if isAdmin(shopId);
+      }
+    }
+  }
+}

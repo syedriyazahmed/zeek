@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "637168805180",
+    "project_id": "zeek-perfume",
+    "storage_bucket": "zeek-perfume.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:637168805180:android:9069eaab0117d5fc302a39",
+        "android_client_info": {
+          "package_name": "com.example.perfume_pos"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDp50yD5bodIbymeTPQX0OOmSs4RXqCdhI"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
